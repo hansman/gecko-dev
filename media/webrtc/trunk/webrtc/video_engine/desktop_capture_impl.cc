@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string>
 
+#include "webrtc/common_video/libyuv/include/scaler.h"
 #include "webrtc/common_video/libyuv/include/webrtc_libyuv.h"
 #include "webrtc/modules/interface/module_common_types.h"
 #include "webrtc/modules/video_capture/video_capture_config.h"
@@ -643,7 +644,62 @@ int32_t DesktopCaptureImpl::IncomingFrame(uint8_t* videoFrame,
                    frameInfo.rawType);
       return -1;
     }
-    DeliverCapturedFrame(_captureFrame, captureTime);
+
+    int32_t reqMaxHeight = _requestedCapability.height & 0xffff;
+    int32_t reqMaxWidth = _requestedCapability.width & 0xffff;
+    int32_t reqIdealHeight = (_requestedCapability.height >> 16) & 0xffff;
+    int32_t reqIdealWidth = (_requestedCapability.width >> 16) & 0xffff;
+
+    int32_t maxHeight = std::min(reqMaxHeight, frameInfo.height);
+    int32_t maxWidth = std::min(reqMaxWidth, frameInfo.width);
+    int32_t dst_height = std::min(reqIdealHeight > 0 ? reqIdealHeight : frameInfo.height, maxHeight);
+    int32_t dst_width = std::min(reqIdealWidth > 0 ? reqIdealWidth : frameInfo.width, maxWidth);
+
+    // scale to average of portrait and landscape
+    float scaleHeight = (float)dst_height / (float)frameInfo.height;
+    float scaleWidth = (float)dst_width / (float)frameInfo.width;
+    float scale = (scaleWidth + scaleHeight) / 2;
+    dst_width = (int)(scale * frameInfo.width);
+    dst_height = (int)(scale * frameInfo.height);
+
+    // if scaled rectangle exceeds max rectangle, scale to minimum of portrait and landscape
+    if (dst_width > maxWidth || dst_height > maxHeight) {
+      scale = std::min(scaleWidth, scaleHeight);
+      dst_width = (int)(scale * frameInfo.width);
+      dst_height = (int)(scale * frameInfo.height);
+    }
+
+    if (width == frameInfo.width && dst_height == frameInfo.height) {
+      DeliverCapturedFrame(_captureFrame, captureTime);
+    } else {
+
+      I420VideoFrame scaledFrame;
+      ret = scaledFrame.CreateEmptyFrame(dst_width,
+                                               dst_height,
+                                               stride_y,
+                                               stride_uv, stride_uv);
+      if (ret < 0) {
+        WEBRTC_TRACE(webrtc::kTraceError, webrtc::kTraceVideoCapture, _id,
+                     "Failed to allocate I420 frame.");
+        return -1;
+      }
+
+      webrtc::Scaler s;
+      s.Set(width, height, dst_width, dst_height, kI420, kI420, kScaleBox);
+      const int scaleResult = s.Scale(_captureFrame, &scaledFrame);
+
+      if (scaleResult != 0) {
+        WEBRTC_TRACE(webrtc::kTraceError, webrtc::kTraceVideoCapture, _id,
+                     "Failed to scale capture frame from type %d",
+                     frameInfo.rawType);
+        return -1;
+      }
+
+      DeliverCapturedFrame(scaledFrame, captureTime);
+    }
+
+
+
   } else {
     assert(false);
     return -1;
